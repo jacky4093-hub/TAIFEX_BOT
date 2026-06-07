@@ -1,7 +1,0 @@
-{
-  "version": "5.0.8",
-  "release_date": "2026-06-07",
-  "channel": "stable",
-  "notes": "修正 QComboBox 點選後不會立即收合與套用的問題",
-  "release_name": "combo_select_fix"
-}

@@ -1,7 +1,0 @@
-{
-  "version": "5.0.4",
-  "release_date": "2026-06-07",
-  "channel": "stable",
-  "notes": "修正價格欄位名稱為台指期",
-  "name": "no_grid_strategy"
-}

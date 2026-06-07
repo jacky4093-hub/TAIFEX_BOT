@@ -1,6 +1,0 @@
-{
-  "version": "5.0.0",
-  "update_check_url": "",
-  "download_url": "",
-  "notes": "V5-0：完成 MarketFactory / BrokerFactory 架構重構。Shioaji 行情與真實下單仍保持安全鎖定。"
-}

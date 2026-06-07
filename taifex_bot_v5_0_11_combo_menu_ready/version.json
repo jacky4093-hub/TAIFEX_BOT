@@ -1,6 +1,0 @@
-{
-  "version": "5.0.11",
-  "release_date": "2026-06-07",
-  "channel": "stable",
-  "note": "修正 WSLg/PyQt6 QComboBox 下拉選單不收合問題，改用 QPushButton + QMenu 選單元件。"
-}

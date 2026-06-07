@@ -1,6 +1,0 @@
-{
-  "version": "5.0.10",
-  "release_date": "2026-06-07",
-  "channel": "stable",
-  "note": "下拉選單改回 PyQt6 原生行為，修正選擇後不收合與無法再次選擇問題"
-}
