@@ -1,0 +1,6 @@
+{
+  "version": "5.0.13",
+  "release_date": "2026-06-07",
+  "channel": "stable",
+  "description": "修正下拉選單：改為內嵌選項，不使用 QComboBox/QMenu popup"
+}
