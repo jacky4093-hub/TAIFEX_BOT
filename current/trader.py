@@ -14,11 +14,12 @@ class Position:
 
 
 class SimulatedTrader:
-    def __init__(self, initial_equity: float, point_value: int, margin_per_contract: int, contracts: int):
+    def __init__(self, initial_equity: float, point_value: int, margin_per_contract: int, contracts: int, maintenance_margin_per_contract: int | None = None):
         self.initial_equity = initial_equity
         self.realized_pnl = 0.0
         self.point_value = point_value
         self.margin_per_contract = margin_per_contract
+        self.maintenance_margin_per_contract = maintenance_margin_per_contract or int(margin_per_contract * 0.8)
         self.contracts = contracts
         self.position: Position | None = None
         self.trades = []
@@ -28,6 +29,7 @@ class SimulatedTrader:
         self.day_start_equity = float(initial_equity)
         self.day_start_realized_pnl = 0.0
         self.daily_risk_locked = False
+        self.margin_risk_locked = False
         self.same_direction_notice_shown = False
         self.last_open_ts = 0.0
         self.last_close_ts = 0.0
@@ -41,14 +43,16 @@ class SimulatedTrader:
             self.day_start_realized_pnl = self.realized_pnl
             self.open_count = 0
             self.daily_risk_locked = False
+            self.margin_risk_locked = False
             self.same_direction_notice_shown = False
             self.last_open_ts = 0.0
             self.last_close_ts = 0.0
             self.last_stop_loss_ts = 0.0
 
-    def set_contract(self, point_value: int, margin_per_contract: int, contracts: int):
+    def set_contract(self, point_value: int, margin_per_contract: int, contracts: int, maintenance_margin_per_contract: int | None = None):
         self.point_value = point_value
         self.margin_per_contract = margin_per_contract
+        self.maintenance_margin_per_contract = maintenance_margin_per_contract or int(margin_per_contract * 0.8)
         self.contracts = contracts
 
     def floating_pnl(self, current_price: float) -> float:
@@ -95,6 +99,25 @@ class SimulatedTrader:
     def required_margin_for_new_position(self) -> float:
         return self.margin_per_contract * self.contracts
 
+    def maintenance_margin_for_position(self) -> float:
+        if self.position is None:
+            return 0.0
+        return self.maintenance_margin_per_contract * self.position.contracts
+
+    def check_maintenance_margin_risk(self, current_price: float):
+        """權益低於維持保證金時，只暫停交易，不停止行情監測。"""
+        if self.position is None:
+            if self.margin_risk_locked and self.equity(current_price) >= self.required_margin_for_new_position():
+                self.margin_risk_locked = False
+            return None
+
+        eq = self.equity(current_price)
+        required = self.maintenance_margin_for_position()
+        if required > 0 and eq < required:
+            self.margin_risk_locked = True
+            return f"權益數低於維持保證金：權益 {eq:,.0f} 元，維持保證金 {required:,.0f} 元。機器人交易已暫停，監測行情繼續。"
+        return None
+
     def is_daily_loss_reached(self, settings: dict, current_price: float) -> bool:
         self.reset_daily_baseline_if_needed(current_price)
         limit_amount = self.max_daily_loss_amount(settings)
@@ -111,6 +134,9 @@ class SimulatedTrader:
     def _check_open_allowed(self, settings: dict, current_price: float) -> tuple[bool, str]:
         self.reset_daily_baseline_if_needed(current_price)
         now_ts = datetime.now().timestamp()
+
+        if self.margin_risk_locked:
+            return False, "權益數低於維持保證金，暫停開新倉"
 
         if self.daily_risk_locked or self.is_daily_loss_reached(settings, current_price):
             self.daily_risk_locked = True

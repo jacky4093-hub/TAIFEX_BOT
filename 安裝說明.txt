@@ -1,0 +1,15 @@
+TAIFEX_BOT V5.1.2 clean package
+
+解壓位置：
+D:\AI程式專案\TAIFEX_BOT
+
+會覆蓋/更新：
+current 資料夾
+.vscode/launch.json
+
+啟動方式：
+1. VS Code 開啟 D:\AI程式專案\TAIFEX_BOT
+2. 按 F5
+或在 WSL 終端機執行：
+cd /mnt/d/AI程式專案/TAIFEX_BOT/current
+python3 main_gui.py
