@@ -1,5 +1,8 @@
 import sys
 import time
+import json
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QGridLayout, QSpinBox, QCheckBox, QTextEdit, QGroupBox,
@@ -13,17 +16,11 @@ from broker_factory import BrokerFactory
 from strategy import StrategyEngine
 from updater import check_update, load_local_version
 
-APP_VERSION = load_local_version().get("version", "5.1.0")
+APP_VERSION = load_local_version().get("version", "5.1.2")
+SETTINGS_FILE = Path("settings.json")
 
 
 class FixedComboBox(QPushButton):
-    """
-    用 QPushButton + QMenu 取代 QComboBox。
-
-    原本 QComboBox 在部分 WSLg / Linux GUI 環境會發生 popup 不收合、
-    選單殘留在桌面的問題。這個元件不用 Qt 原生 ComboBox popup，
-    點選項目後會立刻設定文字並關閉選單，下次也能正常再選。
-    """
     currentTextChanged = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -66,11 +63,12 @@ class FixedComboBox(QPushButton):
         self._menu.close()
         self._menu.popup(self.mapToGlobal(self.rect().bottomLeft()))
 
+
 class TaifexBotGUI(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"TAIFEX Bot V5-1-0 - 冷卻時間與交易時段版")
-        self.resize(1100, 800)
+        self.setWindowTitle(f"TAIFEX Bot V5.1.2 - 監測與交易分離版")
+        self.resize(1150, 850)
 
         self.market = None
         self.strategy = StrategyEngine()
@@ -78,17 +76,22 @@ class TaifexBotGUI(QWidget):
         self.current_price = 22000
         self._last_log_time = {}
         self.log_cooldown_seconds = 5
+        self.trading_enabled = False
+        self.trading_pause_reason = "尚未啟用交易"
+        self._settings_loaded = False
+        self._loading_settings = False
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.on_tick)
 
         self.build_ui()
+        self.load_settings()
         self.reset_system()
 
     def build_ui(self):
         main = QVBoxLayout()
 
-        title = QLabel(f"台指期多商品多策略模擬交易機器人 V5-1-0  版本：{APP_VERSION}")
+        title = QLabel(f"台指期多商品多策略模擬交易機器人 V5.1.2  版本：{APP_VERSION}")
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
         main.addWidget(title)
 
@@ -117,7 +120,6 @@ class TaifexBotGUI(QWidget):
 
         self.price_label = QLabel("台指期：-")
         self.price_label.setStyleSheet("font-size: 28px; font-weight: bold;")
-
         self.equity_label = QLabel("帳戶權益：-")
         self.available_label = QLabel("可用資金：-")
         self.used_margin_label = QLabel("已用保證金：-")
@@ -127,6 +129,9 @@ class TaifexBotGUI(QWidget):
         self.daily_pnl_label = QLabel("今日損益：-")
         self.position_label = QLabel("持倉：-")
         self.point_value_label = QLabel("點值：-")
+        self.monitor_status_label = QLabel("監測狀態：停止")
+        self.trade_status_label = QLabel("交易狀態：暫停")
+        self.trade_status_label.setStyleSheet("font-weight: bold;")
 
         account.addWidget(QLabel("商品"), 0, 0)
         account.addWidget(self.contract_box, 0, 1)
@@ -134,7 +139,7 @@ class TaifexBotGUI(QWidget):
         account.addWidget(self.market_source_box, 0, 3)
         account.addWidget(QLabel("帳戶權益數"), 0, 4)
         account.addWidget(self.initial_equity_spin, 0, 5)
-        account.addWidget(QLabel("口數"), 0, 6)
+        account.addWidget(QLabel("每次下單口數"), 0, 6)
         account.addWidget(self.contracts_spin, 0, 7)
         account.addWidget(QLabel("單口保證金"), 0, 8)
         account.addWidget(self.margin_spin, 0, 9)
@@ -142,6 +147,8 @@ class TaifexBotGUI(QWidget):
         account.addWidget(self.price_label, 1, 0, 1, 2)
         account.addWidget(self.point_value_label, 1, 2)
         account.addWidget(self.position_label, 1, 3, 1, 2)
+        account.addWidget(self.monitor_status_label, 1, 5, 1, 2)
+        account.addWidget(self.trade_status_label, 1, 7, 1, 3)
 
         account.addWidget(self.equity_label, 2, 0)
         account.addWidget(self.available_label, 2, 1)
@@ -149,7 +156,7 @@ class TaifexBotGUI(QWidget):
         account.addWidget(self.float_pnl_label, 2, 3)
         account.addWidget(self.realized_pnl_label, 2, 4)
         account.addWidget(self.risk_ratio_label, 2, 5)
-        account.addWidget(self.daily_pnl_label, 2, 6)
+        account.addWidget(self.daily_pnl_label, 2, 6, 1, 2)
 
         account_group.setLayout(account)
         main.addWidget(account_group)
@@ -184,18 +191,15 @@ class TaifexBotGUI(QWidget):
         grid.addWidget(self.breakout_upper, 0, 2)
         grid.addWidget(QLabel("上限動作"), 0, 3)
         grid.addWidget(self.breakout_upper_action, 0, 4)
-
         grid.addWidget(QLabel("跌破下限"), 1, 1)
         grid.addWidget(self.breakout_lower, 1, 2)
         grid.addWidget(QLabel("下限動作"), 1, 3)
         grid.addWidget(self.breakout_lower_action, 1, 4)
-
         grid.addWidget(self.enable_range, 2, 0)
         grid.addWidget(QLabel("區間買進"), 2, 1)
         grid.addWidget(self.range_buy, 2, 2)
         grid.addWidget(QLabel("區間賣出"), 2, 3)
         grid.addWidget(self.range_sell, 2, 4)
-
         grid.addWidget(self.enable_ma, 3, 0)
         grid.addWidget(QLabel("短均線"), 3, 1)
         grid.addWidget(self.ma_short, 3, 2)
@@ -210,14 +214,13 @@ class TaifexBotGUI(QWidget):
 
         self.take_profit = self.spin(40, 1, 10000)
         self.stop_loss = self.spin(25, 1, 10000)
-        self.max_loss = self.spin(10000, 1, 10000000)
+        self.max_loss = self.spin(10000, 0, 10000000)
         self.max_loss_unit_box = FixedComboBox()
         self.max_loss_unit_box.addItems(["元", "%"])
-        self.max_trades = self.spin(20, 1, 1000)
+        self.max_trades = self.spin(20, 0, 1000)
         self.tick_interval = self.spin(200, 50, 5000)
-
         self.open_cooldown = self.spin(30, 0, 3600)
-        self.exit_cooldown = self.spin(10, 0, 3600)
+        self.stop_loss_reentry_cooldown = self.spin(300, 0, 86400)
 
         self.enable_time_filter = QCheckBox("啟用交易時段限制")
         self.enable_time_filter.setChecked(False)
@@ -234,19 +237,18 @@ class TaifexBotGUI(QWidget):
         risk.addWidget(self.take_profit, 0, 1)
         risk.addWidget(QLabel("停損點數"), 0, 2)
         risk.addWidget(self.stop_loss, 0, 3)
-        risk.addWidget(QLabel("每日最大虧損"), 1, 0)
+        risk.addWidget(QLabel("每日最大虧損(0=不限制)"), 1, 0)
         risk.addWidget(self.max_loss, 1, 1)
         risk.addWidget(QLabel("單位"), 1, 2)
         risk.addWidget(self.max_loss_unit_box, 1, 3)
-        risk.addWidget(QLabel("每日最大交易次數"), 1, 4)
+        risk.addWidget(QLabel("每日最大交易次數(0=不限制)"), 1, 4)
         risk.addWidget(self.max_trades, 1, 5)
         risk.addWidget(QLabel("模擬行情速度ms"), 2, 0)
         risk.addWidget(self.tick_interval, 2, 1)
-        risk.addWidget(QLabel("開倉冷卻秒數"), 2, 2)
+        risk.addWidget(QLabel("開倉冷卻秒數(0秒=關閉)"), 2, 2)
         risk.addWidget(self.open_cooldown, 2, 3)
-        risk.addWidget(QLabel("平倉冷卻秒數"), 2, 4)
-        risk.addWidget(self.exit_cooldown, 2, 5)
-
+        risk.addWidget(QLabel("停損後重新進場冷卻秒數(0秒=關閉)"), 2, 4)
+        risk.addWidget(self.stop_loss_reentry_cooldown, 2, 5)
         risk.addWidget(self.enable_time_filter, 3, 0, 1, 2)
         risk.addWidget(QLabel("開始交易"), 3, 2)
         risk.addWidget(self.trade_start_hour, 3, 3)
@@ -265,30 +267,52 @@ class TaifexBotGUI(QWidget):
         risk_group.setLayout(risk)
         main.addWidget(risk_group)
 
-        buttons = QHBoxLayout()
-        self.start_btn = QPushButton("開始監控")
-        self.stop_btn = QPushButton("停止監控")
-        self.reset_btn = QPushButton("重置")
-        self.update_btn = QPushButton("檢查更新")
-        self.export_btn = QPushButton("匯出交易紀錄")
+        stats_group = QGroupBox("交易統計")
+        stats = QGridLayout()
+        self.today_trade_count_label = QLabel("今日開倉次數：0")
+        self.closed_trade_count_label = QLabel("已完成交易：0")
+        self.win_rate_label = QLabel("勝率：0.0%")
+        self.avg_win_label = QLabel("平均獲利：0")
+        self.avg_loss_label = QLabel("平均虧損：0")
+        self.profit_factor_label = QLabel("獲利因子：0.00")
+        stats.addWidget(self.today_trade_count_label, 0, 0)
+        stats.addWidget(self.closed_trade_count_label, 0, 1)
+        stats.addWidget(self.win_rate_label, 0, 2)
+        stats.addWidget(self.avg_win_label, 1, 0)
+        stats.addWidget(self.avg_loss_label, 1, 1)
+        stats.addWidget(self.profit_factor_label, 1, 2)
+        stats_group.setLayout(stats)
+        main.addWidget(stats_group)
 
-        self.start_btn.clicked.connect(self.start)
-        self.stop_btn.clicked.connect(self.stop)
+        buttons = QHBoxLayout()
+        self.start_monitor_btn = QPushButton("開始監測")
+        self.stop_monitor_btn = QPushButton("停止監測")
+        self.enable_trade_btn = QPushButton("啟用交易")
+        self.pause_trade_btn = QPushButton("暫停交易")
+        self.reset_btn = QPushButton("重置")
+        self.save_settings_btn = QPushButton("儲存設定")
+        self.update_btn = QPushButton("檢查更新")
+        self.export_btn = QPushButton("匯出CSV")
+        self.export_excel_btn = QPushButton("匯出Excel")
+
+        self.start_monitor_btn.clicked.connect(self.start_monitoring)
+        self.stop_monitor_btn.clicked.connect(self.stop_monitoring)
+        self.enable_trade_btn.clicked.connect(self.enable_trading)
+        self.pause_trade_btn.clicked.connect(lambda: self.pause_trading("手動暫停交易"))
         self.reset_btn.clicked.connect(self.reset_system)
+        self.save_settings_btn.clicked.connect(lambda: self.save_settings(show_message=True))
         self.update_btn.clicked.connect(self.check_for_updates)
         self.export_btn.clicked.connect(self.export_trades)
+        self.export_excel_btn.clicked.connect(self.export_trades_excel)
 
-        buttons.addWidget(self.start_btn)
-        buttons.addWidget(self.stop_btn)
-        buttons.addWidget(self.reset_btn)
-        buttons.addWidget(self.update_btn)
-        buttons.addWidget(self.export_btn)
+        for btn in [self.start_monitor_btn, self.stop_monitor_btn, self.enable_trade_btn, self.pause_trade_btn,
+                    self.reset_btn, self.save_settings_btn, self.update_btn, self.export_btn, self.export_excel_btn]:
+            buttons.addWidget(btn)
         main.addLayout(buttons)
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         main.addWidget(self.log)
-
         self.setLayout(main)
 
     def spin(self, value, min_v=1, max_v=1000000):
@@ -302,6 +326,11 @@ class TaifexBotGUI(QWidget):
 
     def get_settings(self):
         return {
+            "contract": self.contract_box.currentText(),
+            "market_source": self.market_source_box.currentText(),
+            "initial_equity": self.initial_equity_spin.value(),
+            "contracts": self.contracts_spin.value(),
+            "margin": self.margin_spin.value(),
             "enable_breakout": self.enable_breakout.isChecked(),
             "enable_range": self.enable_range.isChecked(),
             "enable_ma": self.enable_ma.isChecked(),
@@ -319,7 +348,7 @@ class TaifexBotGUI(QWidget):
             "max_loss_unit": self.max_loss_unit_box.currentText(),
             "max_trades": self.max_trades.value(),
             "open_cooldown_seconds": self.open_cooldown.value(),
-            "exit_cooldown_seconds": self.exit_cooldown.value(),
+            "stop_loss_reentry_cooldown_seconds": self.stop_loss_reentry_cooldown.value(),
             "enable_time_filter": self.enable_time_filter.isChecked(),
             "trade_start_hour": self.trade_start_hour.value(),
             "trade_start_minute": self.trade_start_minute.value(),
@@ -330,9 +359,76 @@ class TaifexBotGUI(QWidget):
             "force_close_minute": self.force_close_minute.value(),
         }
 
+    def apply_settings(self, data: dict):
+        combo_map = {
+            "contract": self.contract_box,
+            "market_source": self.market_source_box,
+            "breakout_upper_action": self.breakout_upper_action,
+            "breakout_lower_action": self.breakout_lower_action,
+            "max_loss_unit": self.max_loss_unit_box,
+        }
+        spin_map = {
+            "initial_equity": self.initial_equity_spin,
+            "contracts": self.contracts_spin,
+            "margin": self.margin_spin,
+            "breakout_upper": self.breakout_upper,
+            "breakout_lower": self.breakout_lower,
+            "range_buy": self.range_buy,
+            "range_sell": self.range_sell,
+            "ma_short": self.ma_short,
+            "ma_long": self.ma_long,
+            "take_profit": self.take_profit,
+            "stop_loss": self.stop_loss,
+            "max_loss": self.max_loss,
+            "max_trades": self.max_trades,
+            "open_cooldown_seconds": self.open_cooldown,
+            "stop_loss_reentry_cooldown_seconds": self.stop_loss_reentry_cooldown,
+            "trade_start_hour": self.trade_start_hour,
+            "trade_start_minute": self.trade_start_minute,
+            "stop_open_hour": self.stop_open_hour,
+            "stop_open_minute": self.stop_open_minute,
+            "force_close_hour": self.force_close_hour,
+            "force_close_minute": self.force_close_minute,
+        }
+        check_map = {
+            "enable_breakout": self.enable_breakout,
+            "enable_range": self.enable_range,
+            "enable_ma": self.enable_ma,
+            "enable_time_filter": self.enable_time_filter,
+            "enable_force_close": self.enable_force_close,
+        }
+        for key, widget in combo_map.items():
+            if key in data:
+                widget.setCurrentText(data[key])
+        for key, widget in spin_map.items():
+            if key in data:
+                widget.setValue(int(data[key]))
+        for key, widget in check_map.items():
+            if key in data:
+                widget.setChecked(bool(data[key]))
+
+    def save_settings(self, show_message=False):
+        SETTINGS_FILE.write_text(json.dumps(self.get_settings(), ensure_ascii=False, indent=2), encoding="utf-8")
+        if show_message:
+            QMessageBox.information(self, "完成", "設定已儲存到 settings.json")
+
+    def load_settings(self):
+        if not SETTINGS_FILE.exists():
+            return
+        try:
+            self._loading_settings = True
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            self.apply_settings(data)
+            self._settings_loaded = True
+        except Exception as exc:
+            QMessageBox.warning(self, "設定讀取失敗", f"settings.json 讀取失敗：{exc}")
+        finally:
+            self._loading_settings = False
+
     def reset_system(self):
         info = self.get_contract_info()
-        self.margin_spin.setValue(info["margin"])
+        if not self._settings_loaded:
+            self.margin_spin.setValue(info["margin"])
         self.current_price = info["default_price"]
         self.market = MarketFactory.create("sim", self.current_price)
         self.strategy.reset()
@@ -343,32 +439,45 @@ class TaifexBotGUI(QWidget):
             self.margin_spin.value(),
             self.contracts_spin.value()
         )
+        self.trading_enabled = False
+        self.trading_pause_reason = "重置後交易暫停"
         self.log.clear()
-        self.append_log("系統已重置，目前使用 MarketFactory + BrokerFactory 架構")
-        self.append_log("目前只啟用模擬行情 + 模擬交易，不會真實下單")
-        self.append_log("Shioaji 真實行情已預留，下一版 V5-1 會加入登入設定畫面")
-        self.append_log("每日最大虧損已改為：以當日本金基準計算，不再用虧損交易加總")
-        self.append_log("突破策略已新增方向選單：突破上限 / 跌破下限 可分別設定做多、做空或不動作")
-        self.append_log("達每日最大虧損時會先檢查持倉，平倉完成後才停止監測與交易")
-        self.append_log("日誌防洗版已啟用：同方向持倉提示只顯示一次，相同訊息 5 秒內不重複顯示")
-        self.append_log("新增策略冷卻時間：開倉冷卻、平倉冷卻，可降低雜訊洗單")
-        self.append_log("新增交易時段限制：可設定開始交易、停止開倉、強制平倉時間")
+        self.append_log("系統已重置，目前使用模擬行情 + 模擬交易，不會真實下單")
+        self.append_log("V5.1.2：監測行情與機器人交易已拆成兩個按鈕")
+        self.append_log("達每日最大交易次數或每日最大虧損時，只會暫停機器人交易，監測行情會繼續")
+        self.append_log("平倉冷卻已移除，避免妨礙停損、停利、強制平倉等風控")
+        self.append_log("新增停損後重新進場冷卻，可降低連續停損來回打臉；0秒代表關閉")
+        self.append_log("開倉冷卻與停損後重新進場冷卻都支援 0秒=關閉")
+        self.append_log("每日最大交易次數與每日最大虧損都支援 0=不限制")
+        self.append_log("目前口數代表每次下單口數；金字塔加碼的最大總持倉口數保留到未來版本")
         self.update_labels()
 
-    def on_contract_changed(self):
+    def on_contract_changed(self, *_):
+        if self._loading_settings:
+            return
         if self.timer.isActive():
-            self.stop()
+            self.stop_monitoring()
         self.reset_system()
 
-    def start(self):
+    def start_monitoring(self):
         if self.market_source_box.currentText().startswith("Shioaji"):
             QMessageBox.information(
                 self,
                 "尚未啟用",
-                "Shioaji 真實行情目前只是預留。\nV5-1 會加入登入設定畫面。\nV5-2 才會接 TX / MTX / TMF 即時行情。"
+                "Shioaji 真實行情目前只是預留。\n目前版本仍使用模擬行情。"
             )
             return
+        self.timer.start(self.tick_interval.value())
+        self.append_log("開始監測行情")
+        self.update_labels()
 
+    def stop_monitoring(self):
+        self.timer.stop()
+        self.pause_trading("停止監測，交易同步暫停")
+        self.append_log("停止監測行情")
+        self.update_labels()
+
+    def enable_trading(self):
         required = self.margin_spin.value() * self.contracts_spin.value()
         if self.initial_equity_spin.value() < required:
             QMessageBox.warning(
@@ -379,13 +488,28 @@ class TaifexBotGUI(QWidget):
                 f"請降低口數、改交易較小商品，或提高帳戶權益數。"
             )
             return
+        if not self.timer.isActive():
+            self.start_monitoring()
+            if not self.timer.isActive():
+                return
+        if self.trader.daily_risk_locked:
+            QMessageBox.warning(self, "無法啟用交易", "今日已達每日最大虧損限制，請重置或隔日再啟用。")
+            return
+        if self.trader.is_max_trades_reached(self.get_settings()):
+            QMessageBox.warning(self, "無法啟用交易", "今日已達每日最大交易次數。")
+            return
+        self.trading_enabled = True
+        self.trading_pause_reason = ""
+        self.append_log("機器人交易已啟用")
+        self.update_labels()
 
-        self.timer.start(self.tick_interval.value())
-        self.append_log("開始監控")
-
-    def stop(self):
-        self.timer.stop()
-        self.append_log("停止監控")
+    def pause_trading(self, reason="手動暫停交易"):
+        was_enabled = self.trading_enabled
+        self.trading_enabled = False
+        self.trading_pause_reason = reason
+        if was_enabled:
+            self.append_log(reason)
+        self.update_labels()
 
     def on_tick(self):
         tick = self.market.next_tick()
@@ -393,23 +517,17 @@ class TaifexBotGUI(QWidget):
 
         info = self.get_contract_info()
         self.trader.set_contract(info["point_value"], self.margin_spin.value(), self.contracts_spin.value())
-
         settings = self.get_settings()
 
         force_close_msg = self.trader.check_force_close_time(self.current_price, settings)
         if force_close_msg:
             self.append_log(force_close_msg)
-            self.update_labels()
-            return
 
         daily_risk_msg = self.trader.check_daily_risk(self.current_price, settings)
         if daily_risk_msg:
             self.append_log(daily_risk_msg)
             if self.trader.daily_risk_locked and self.trader.position is None:
-                self.timer.stop()
-                self.append_log("已達每日最大虧損限制，確認無持倉，停止監測與交易")
-            self.update_labels()
-            return
+                self.pause_trading("已達每日最大虧損限制，機器人交易已暫停，監測行情繼續")
 
         stop_msg = self.trader.check_stop(self.current_price, settings)
         if stop_msg:
@@ -419,16 +537,21 @@ class TaifexBotGUI(QWidget):
         if daily_risk_msg:
             self.append_log(daily_risk_msg)
             if self.trader.daily_risk_locked and self.trader.position is None:
-                self.timer.stop()
-                self.append_log("已達每日最大虧損限制，確認無持倉，停止監測與交易")
-            self.update_labels()
-            return
+                self.pause_trading("已達每日最大虧損限制，機器人交易已暫停，監測行情繼續")
+
+        if self.trading_enabled and self.trader.is_max_trades_reached(settings) and self.trader.position is None:
+            self.pause_trading("已達每日最大交易次數，機器人交易已暫停，監測行情繼續")
 
         signals = self.strategy.on_price(self.current_price, settings)
-        for signal in signals:
-            msg = self.trader.on_signal(signal.action, self.current_price, signal.reason, settings)
-            if msg:
-                self.append_log(msg)
+        if self.trading_enabled:
+            for signal in signals:
+                msg = self.trader.on_signal(signal.action, self.current_price, signal.reason, settings)
+                if msg:
+                    self.append_log(msg)
+                    if "已達每日最大交易次數" in msg:
+                        self.pause_trading("已達每日最大交易次數，機器人交易已暫停，監測行情繼續")
+        elif signals:
+            self.append_log(f"交易暫停中，僅監測訊號：{signals[0].action} / {signals[0].reason}")
 
         self.update_labels()
 
@@ -445,6 +568,7 @@ class TaifexBotGUI(QWidget):
         risk = self.trader.risk_ratio(self.current_price)
         daily_pnl = self.trader.daily_pnl(self.current_price)
         daily_pnl_pct = self.trader.daily_pnl_percent(self.current_price)
+        stats = self.trader.stats()
 
         self.price_label.setText(f"台指期：{self.current_price}")
         self.point_value_label.setText(f"點值：{info['point_value']} 元 / 點")
@@ -456,6 +580,18 @@ class TaifexBotGUI(QWidget):
         self.realized_pnl_label.setText(f"已實現損益：{realized:,.0f}")
         self.risk_ratio_label.setText(f"風險率：{risk:.1f}%")
         self.daily_pnl_label.setText(f"今日損益：{daily_pnl:,.0f} / {daily_pnl_pct:.2f}%")
+        self.monitor_status_label.setText("監測狀態：運行中" if self.timer.isActive() else "監測狀態：停止")
+        if self.trading_enabled:
+            self.trade_status_label.setText("交易狀態：啟用")
+        else:
+            self.trade_status_label.setText(f"交易狀態：暫停（{self.trading_pause_reason}）")
+        max_trades_text = "不限制" if self.max_trades.value() <= 0 else str(self.max_trades.value())
+        self.today_trade_count_label.setText(f"今日開倉次數：{stats['open_count']} / {max_trades_text}")
+        self.closed_trade_count_label.setText(f"已完成交易：{stats['closed_trades']}")
+        self.win_rate_label.setText(f"勝率：{stats['win_rate']:.1f}%")
+        self.avg_win_label.setText(f"平均獲利：{stats['avg_win']:,.0f}")
+        self.avg_loss_label.setText(f"平均虧損：{stats['avg_loss']:,.0f}")
+        self.profit_factor_label.setText(f"獲利因子：{stats['profit_factor']:.2f}")
 
     def check_for_updates(self):
         info = check_update()
@@ -470,12 +606,7 @@ class TaifexBotGUI(QWidget):
                 f"目前版本先提供檢查與提示，下一版可加入自動下載覆蓋。"
             )
         else:
-            QMessageBox.information(
-                self,
-                "檢查更新",
-                f"目前版本：{info.current_version}\n"
-                f"{info.message}"
-            )
+            QMessageBox.information(self, "檢查更新", f"目前版本：{info.current_version}\n{info.message}")
 
     def append_log(self, text):
         if not text:
@@ -488,17 +619,30 @@ class TaifexBotGUI(QWidget):
         self.log.append(text)
 
     def export_trades(self):
-        ok = self.trader.export_trades("trades.csv")
+        ok = self.trader.export_trades("trades_v5_1_2.csv")
         if ok:
-            QMessageBox.information(self, "完成", "已匯出 trades.csv")
+            QMessageBox.information(self, "完成", "已匯出 trades_v5_1_2.csv")
         else:
             QMessageBox.warning(self, "沒有資料", "目前沒有交易紀錄可以匯出")
+
+    def export_trades_excel(self):
+        ok = self.trader.export_trades_excel("trades_v5_1_2.xlsx")
+        if ok:
+            QMessageBox.information(self, "完成", "已匯出 trades_v5_1_2.xlsx")
+        else:
+            QMessageBox.warning(self, "沒有資料", "目前沒有交易紀錄可以匯出")
+
+    def closeEvent(self, event):
+        self.save_settings(show_message=False)
+        event.accept()
+
 
 def main():
     app = QApplication(sys.argv)
     gui = TaifexBotGUI()
     gui.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
