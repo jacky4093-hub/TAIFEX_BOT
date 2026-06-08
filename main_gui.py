@@ -87,6 +87,7 @@ class TaifexBotGUI(QWidget):
         self.build_ui()
         self.load_settings()
         self.reset_system()
+        self.setup_auto_save_connections()
 
     def build_ui(self):
         main = QVBoxLayout()
@@ -118,6 +119,10 @@ class TaifexBotGUI(QWidget):
         self.margin_spin.setRange(1000, 10000000)
         self.margin_spin.setSingleStep(1000)
 
+        self.maintenance_margin_spin = QSpinBox()
+        self.maintenance_margin_spin.setRange(1000, 10000000)
+        self.maintenance_margin_spin.setSingleStep(1000)
+
         self.price_label = QLabel("台指期：-")
         self.price_label.setStyleSheet("font-size: 28px; font-weight: bold;")
         self.equity_label = QLabel("帳戶權益：-")
@@ -141,8 +146,10 @@ class TaifexBotGUI(QWidget):
         account.addWidget(self.initial_equity_spin, 0, 5)
         account.addWidget(QLabel("每次下單口數"), 0, 6)
         account.addWidget(self.contracts_spin, 0, 7)
-        account.addWidget(QLabel("單口保證金"), 0, 8)
+        account.addWidget(QLabel("單口原始保證金"), 0, 8)
         account.addWidget(self.margin_spin, 0, 9)
+        account.addWidget(QLabel("單口維持保證金"), 0, 10)
+        account.addWidget(self.maintenance_margin_spin, 0, 11)
 
         account.addWidget(self.price_label, 1, 0, 1, 2)
         account.addWidget(self.point_value_label, 1, 2)
@@ -331,6 +338,7 @@ class TaifexBotGUI(QWidget):
             "initial_equity": self.initial_equity_spin.value(),
             "contracts": self.contracts_spin.value(),
             "margin": self.margin_spin.value(),
+            "maintenance_margin": self.maintenance_margin_spin.value(),
             "enable_breakout": self.enable_breakout.isChecked(),
             "enable_range": self.enable_range.isChecked(),
             "enable_ma": self.enable_ma.isChecked(),
@@ -371,6 +379,7 @@ class TaifexBotGUI(QWidget):
             "initial_equity": self.initial_equity_spin,
             "contracts": self.contracts_spin,
             "margin": self.margin_spin,
+            "maintenance_margin": self.maintenance_margin_spin,
             "breakout_upper": self.breakout_upper,
             "breakout_lower": self.breakout_lower,
             "range_buy": self.range_buy,
@@ -407,6 +416,38 @@ class TaifexBotGUI(QWidget):
             if key in data:
                 widget.setChecked(bool(data[key]))
 
+
+    def setup_auto_save_connections(self):
+        widgets = [
+            self.initial_equity_spin, self.contracts_spin, self.margin_spin, self.maintenance_margin_spin,
+            self.breakout_upper, self.breakout_lower, self.range_buy, self.range_sell,
+            self.ma_short, self.ma_long, self.take_profit, self.stop_loss, self.max_loss,
+            self.max_trades, self.tick_interval, self.open_cooldown, self.stop_loss_reentry_cooldown,
+            self.trade_start_hour, self.trade_start_minute, self.stop_open_hour, self.stop_open_minute,
+            self.force_close_hour, self.force_close_minute,
+        ]
+        for widget in widgets:
+            widget.valueChanged.connect(self.auto_save_settings)
+
+        checks = [
+            self.enable_breakout, self.enable_range, self.enable_ma,
+            self.enable_time_filter, self.enable_force_close,
+        ]
+        for widget in checks:
+            widget.toggled.connect(self.auto_save_settings)
+
+        combos = [
+            self.contract_box, self.market_source_box, self.breakout_upper_action,
+            self.breakout_lower_action, self.max_loss_unit_box,
+        ]
+        for widget in combos:
+            widget.currentTextChanged.connect(self.auto_save_settings)
+
+    def auto_save_settings(self, *_):
+        if self._loading_settings or self.trader is None:
+            return
+        self.save_settings(show_message=False)
+
     def save_settings(self, show_message=False):
         SETTINGS_FILE.write_text(json.dumps(self.get_settings(), ensure_ascii=False, indent=2), encoding="utf-8")
         if show_message:
@@ -429,6 +470,7 @@ class TaifexBotGUI(QWidget):
         info = self.get_contract_info()
         if not self._settings_loaded:
             self.margin_spin.setValue(info["margin"])
+            self.maintenance_margin_spin.setValue(info.get("maintenance_margin", int(info["margin"] * 0.8)))
         self.current_price = info["default_price"]
         self.market = MarketFactory.create("sim", self.current_price)
         self.strategy.reset()
@@ -437,7 +479,8 @@ class TaifexBotGUI(QWidget):
             self.initial_equity_spin.value(),
             info["point_value"],
             self.margin_spin.value(),
-            self.contracts_spin.value()
+            self.contracts_spin.value(),
+            self.maintenance_margin_spin.value()
         )
         self.trading_enabled = False
         self.trading_pause_reason = "重置後交易暫停"
@@ -450,6 +493,8 @@ class TaifexBotGUI(QWidget):
         self.append_log("開倉冷卻與停損後重新進場冷卻都支援 0秒=關閉")
         self.append_log("每日最大交易次數與每日最大虧損都支援 0=不限制")
         self.append_log("目前口數代表每次下單口數；金字塔加碼的最大總持倉口數保留到未來版本")
+        self.append_log("新增維持保證金監控：權益數低於維持保證金時，暫停交易但不中斷監測")
+        self.append_log("設定已支援自動保存，關閉程式前也會再保存一次")
         self.update_labels()
 
     def on_contract_changed(self, *_):
@@ -457,6 +502,9 @@ class TaifexBotGUI(QWidget):
             return
         if self.timer.isActive():
             self.stop_monitoring()
+        info = self.get_contract_info()
+        self.margin_spin.setValue(info["margin"])
+        self.maintenance_margin_spin.setValue(info.get("maintenance_margin", int(info["margin"] * 0.8)))
         self.reset_system()
 
     def start_monitoring(self):
@@ -479,12 +527,14 @@ class TaifexBotGUI(QWidget):
 
     def enable_trading(self):
         required = self.margin_spin.value() * self.contracts_spin.value()
+        maintenance_required = self.maintenance_margin_spin.value() * self.contracts_spin.value()
         if self.initial_equity_spin.value() < required:
             QMessageBox.warning(
                 self,
                 "資金不足",
                 f"目前帳戶權益數 {self.initial_equity_spin.value():,} 元\n"
-                f"需要保證金 {required:,} 元\n"
+                f"需要原始保證金 {required:,} 元\n"
+                f"維持保證金參考 {maintenance_required:,} 元\n"
                 f"請降低口數、改交易較小商品，或提高帳戶權益數。"
             )
             return
@@ -516,7 +566,7 @@ class TaifexBotGUI(QWidget):
         self.current_price = tick.price
 
         info = self.get_contract_info()
-        self.trader.set_contract(info["point_value"], self.margin_spin.value(), self.contracts_spin.value())
+        self.trader.set_contract(info["point_value"], self.margin_spin.value(), self.contracts_spin.value(), self.maintenance_margin_spin.value())
         settings = self.get_settings()
 
         force_close_msg = self.trader.check_force_close_time(self.current_price, settings)
@@ -539,6 +589,11 @@ class TaifexBotGUI(QWidget):
             if self.trader.daily_risk_locked and self.trader.position is None:
                 self.pause_trading("已達每日最大虧損限制，機器人交易已暫停，監測行情繼續")
 
+        margin_risk_msg = self.trader.check_maintenance_margin_risk(self.current_price)
+        if margin_risk_msg:
+            self.append_log(margin_risk_msg)
+            self.pause_trading("權益數低於維持保證金，機器人交易已暫停，監測行情繼續")
+
         if self.trading_enabled and self.trader.is_max_trades_reached(settings) and self.trader.position is None:
             self.pause_trading("已達每日最大交易次數，機器人交易已暫停，監測行情繼續")
 
@@ -558,7 +613,7 @@ class TaifexBotGUI(QWidget):
     def update_labels(self):
         info = self.get_contract_info()
         if self.trader:
-            self.trader.set_contract(info["point_value"], self.margin_spin.value(), self.contracts_spin.value())
+            self.trader.set_contract(info["point_value"], self.margin_spin.value(), self.contracts_spin.value(), self.maintenance_margin_spin.value())
 
         equity = self.trader.equity(self.current_price)
         available = self.trader.available_funds(self.current_price)

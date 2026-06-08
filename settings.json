@@ -4,6 +4,7 @@
   "initial_equity": 30000,
   "contracts": 1,
   "margin": 17500,
+  "maintenance_margin": 14000,
   "enable_breakout": true,
   "enable_range": false,
   "enable_ma": false,
